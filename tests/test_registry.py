@@ -102,9 +102,64 @@ def test_search_by_spanish_trigger(harness):
 def test_catalog_rejects_credential_files(tmp_path):
     from skills_registry.catalog import Catalog, CatalogError
 
-    bad = tmp_path / "skills" / "leaky"
-    bad.mkdir(parents=True)
-    (bad / "SKILL.md").write_text("---\nname: leaky\ndescription: x\ntriggers: [x]\n---\nbody", encoding="utf-8")
-    (bad / "id_rsa").write_text("PRIVATE", encoding="utf-8")
+    _write_skill(tmp_path, "leaky")
+    (tmp_path / "skills" / "leaky" / "id_rsa").write_text("PRIVATE", encoding="utf-8")
     with pytest.raises(CatalogError, match="credencial"):
         Catalog(tmp_path)
+
+
+def _write_skill(root, name, version="1.0.0", status="active", extra=""):
+    d = root / "skills" / name
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "SKILL.md").write_text(
+        f"---\nname: {name}\nversion: {version}\ndescription: about {name}\n"
+        f"triggers: [use {name}]\nstatus: {status}\n{extra}---\nbody of {name}",
+        encoding="utf-8",
+    )
+
+
+def test_version_is_mandatory(tmp_path):
+    from skills_registry.catalog import Catalog, CatalogError
+
+    d = tmp_path / "skills" / "unversioned"
+    d.mkdir(parents=True)
+    (d / "SKILL.md").write_text("---\nname: unversioned\ndescription: x\ntriggers: [x]\n---\nb", encoding="utf-8")
+    with pytest.raises(CatalogError, match="version"):
+        Catalog(tmp_path)
+
+
+def test_lifecycle_deprecated_ranks_last_and_retired_is_hidden(tmp_path):
+    from skills_registry.catalog import Catalog
+
+    _write_skill(tmp_path, "widget-v2", version="2.0.0")
+    _write_skill(tmp_path, "widget-old", status="deprecated", extra="superseded_by: widget-v2\n")
+    _write_skill(tmp_path, "widget-dead", status="retired")
+    catalog = Catalog(tmp_path)
+
+    names = [s.name for s in catalog.search("widget use", roles={"user"})]
+    assert "widget-dead" not in names
+    assert names.index("widget-v2") < names.index("widget-old")
+    meta = catalog.skills["widget-old"].meta()
+    assert meta["status"] == "deprecated" and meta["superseded_by"] == "widget-v2"
+
+
+def test_reload_is_admin_only_and_atomic(harness, tmp_path, monkeypatch):
+    client, container = harness
+    from skills_registry.app import CatalogHolder
+    from skills_registry.catalog import Catalog
+
+    _write_skill(tmp_path, "first")
+    holder = container.get(CatalogHolder)
+    monkeypatch.setattr(holder, "_path", tmp_path)
+    monkeypatch.setattr(holder, "catalog", Catalog(tmp_path))
+
+    assert client.post("/api/v1/catalog/reload", headers=bearer(container, "user")).status_code == 403
+
+    _write_skill(tmp_path, "second")
+    r = client.post("/api/v1/catalog/reload", headers=bearer(container, "admin"))
+    assert r.status_code == 200 and r.json() == {"skills": 2}
+
+    # un catalogo invalido se rechaza y el anterior sigue sirviendo
+    (tmp_path / "skills" / "second" / "id_rsa").write_text("PRIVATE", encoding="utf-8")
+    assert client.post("/api/v1/catalog/reload", headers=bearer(container, "admin")).status_code == 422
+    assert len(holder.catalog.skills) == 2

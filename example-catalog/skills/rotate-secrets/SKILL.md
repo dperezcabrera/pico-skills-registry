@@ -1,5 +1,6 @@
 ---
 name: rotate-secrets
+version: 1.0.1
 description: Rotate the fleet's CI secrets and reseed every repository.
 triggers:
   - rotate the tokens

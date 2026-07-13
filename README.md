@@ -52,7 +52,15 @@ tools:
 Body: loaded only when a caller fetches the skill explicitly.
 ```
 
-Boot-time validation: frontmatter contract, name/directory match, at least one trigger, no credential-looking files (`.env`, `id_rsa`, `*.pem`, ...), resource size cap, sha256 per skill published in the index so consumers can verify integrity.
+Boot-time validation: frontmatter contract, name/directory match, at least one trigger, mandatory `version` (X.Y.Z), no credential-looking files (`.env`, `id_rsa`, `*.pem`, ...), resource size cap, sha256 per skill published in the index so consumers can verify integrity.
+
+## Lifecycle
+
+Skills are dynamic, but their lifecycle lives in the catalog repository, not in a write API - creation and updates go through pull requests (agents included: an agent proposes a skill by opening a PR, the gates run, a human merges), so the review gate is never bypassed.
+
+- **Version**: mandatory `version: X.Y.Z` per skill; the catalog CI rejects content changes without a bump. The index publishes version plus content hash.
+- **Deprecate**: `status: deprecated` (optionally `superseded_by: other-skill`) keeps the skill served but ranked last in search and flagged in every response; `status: retired` hides it entirely while its history stays in git.
+- **Hot reload**: `POST /api/v1/catalog/reload` (admin) re-scans the mounted catalog without restarting - call it from the catalog's CD after merge (or a git-sync sidecar). Atomic and fail-safe: an invalid catalog is rejected with a 422 and the previous one keeps serving.
 
 ## Development
 

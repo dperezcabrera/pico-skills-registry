@@ -1,5 +1,6 @@
 ---
 name: deploy-service
+version: 1.2.0
 description: Deploy a service to the cluster with health-gated rollout.
 triggers:
   - deploy the service

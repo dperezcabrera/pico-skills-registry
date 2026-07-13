@@ -30,9 +30,15 @@ class CatalogError(Exception):
     pass
 
 
+STATUSES = ("active", "deprecated", "retired")
+
+
 @dataclass
 class Skill:
     name: str
+    version: str
+    status: str  # active | deprecated (served with warning) | retired (hidden)
+    superseded_by: str
     description: str
     triggers: list[str]
     tags: list[str]
@@ -44,11 +50,15 @@ class Skill:
     resources: list[str] = field(default_factory=list)
 
     def visible_to(self, roles: set[str]) -> bool:
+        if self.status == "retired":
+            return False
         return not self.groups or "admin" in roles or bool(roles & set(self.groups))
 
     def meta(self) -> dict:
-        return {
+        meta = {
             "name": self.name,
+            "version": self.version,
+            "status": self.status,
             "description": self.description,
             "triggers": self.triggers,
             "tags": self.tags,
@@ -57,27 +67,29 @@ class Skill:
             "sha256": self.sha256,
             "resources": self.resources,
         }
+        if self.superseded_by:
+            meta["superseded_by"] = self.superseded_by
+        return meta
 
 
-def _parse_skill(skill_dir: Path) -> Skill:
-    md = skill_dir / "SKILL.md"
-    if not md.is_file():
-        raise CatalogError(f"{skill_dir.name}: falta SKILL.md")
-    match = FRONTMATTER.match(md.read_text(encoding="utf-8"))
-    if not match:
-        raise CatalogError(f"{skill_dir.name}: SKILL.md sin frontmatter YAML")
-    meta = yaml.safe_load(match.group(1)) or {}
-    body = match.group(2)
-
+def _validated_meta(skill_dir: Path, meta: dict) -> dict:
     name = meta.get("name", "")
     if name != skill_dir.name:
         raise CatalogError(f"{skill_dir.name}: name '{name}' no coincide con el directorio")
     if not meta.get("description"):
         raise CatalogError(f"{name}: description obligatoria")
-    triggers = meta.get("triggers") or []
-    if not triggers:
+    if not meta.get("triggers"):
         raise CatalogError(f"{name}: al menos un trigger")
+    version = str(meta.get("version", ""))
+    if not re.fullmatch(r"\d+\.\d+\.\d+", version):
+        raise CatalogError(f"{name}: version obligatoria en formato X.Y.Z")
+    status = str(meta.get("status", "active"))
+    if status not in STATUSES:
+        raise CatalogError(f"{name}: status invalido '{status}' (validos: {', '.join(STATUSES)})")
+    return {**meta, "version": version, "status": status}
 
+
+def _hash_and_resources(skill_dir: Path, name: str) -> tuple[str, list[str]]:
     resources = []
     hasher = hashlib.sha256()
     for f in sorted(p for p in skill_dir.rglob("*") if p.is_file()):
@@ -88,19 +100,39 @@ def _parse_skill(skill_dir: Path) -> Skill:
             raise CatalogError(f"{name}: recurso {f.name} demasiado grande")
         hasher.update(str(f.relative_to(skill_dir)).encode())
         hasher.update(f.read_bytes())
-        if f != md:
+        if f.name != "SKILL.md":
             resources.append(str(f.relative_to(skill_dir)))
+    return hasher.hexdigest(), resources
+
+
+def _parse_skill(skill_dir: Path) -> Skill:
+    md = skill_dir / "SKILL.md"
+    if not md.is_file():
+        raise CatalogError(f"{skill_dir.name}: falta SKILL.md")
+    match = FRONTMATTER.match(md.read_text(encoding="utf-8"))
+    if not match:
+        raise CatalogError(f"{skill_dir.name}: SKILL.md sin frontmatter YAML")
+    meta = _validated_meta(skill_dir, yaml.safe_load(match.group(1)) or {})
+    body = match.group(2)
+    name = meta["name"]
+    version = meta["version"]
+    status = meta["status"]
+    triggers = meta["triggers"]
+    sha256, resources = _hash_and_resources(skill_dir, name)
 
     access = meta.get("access") or {}
     return Skill(
         name=name,
+        version=version,
+        status=status,
+        superseded_by=str(meta.get("superseded_by", "")),
         description=str(meta["description"]),
         triggers=[str(t) for t in triggers],
         tags=[str(t) for t in meta.get("tags") or []],
         groups=[str(g) for g in access.get("groups") or []],
         tools=meta.get("tools") or [],
         body=body,
-        sha256=hasher.hexdigest(),
+        sha256=sha256,
         path=skill_dir,
         resources=resources,
     )
@@ -136,8 +168,9 @@ class Catalog:
             "SELECT name FROM skills WHERE skills MATCH ? ORDER BY bm25(skills) LIMIT ?",
             (" OR ".join(sanitized.split()), limit * 3),
         ).fetchall()
-        hits = (self.skills[name] for (name,) in rows)
-        return [s for s in hits if s.visible_to(roles)][:limit]
+        hits = [self.skills[name] for (name,) in rows if self.skills[name].visible_to(roles)]
+        hits.sort(key=lambda s: s.status != "active")  # deprecated al final, mismo orden bm25 dentro
+        return hits[:limit]
 
     def visible(self, roles: set[str]) -> list[Skill]:
         return [s for s in self.skills.values() if s.visible_to(roles)]

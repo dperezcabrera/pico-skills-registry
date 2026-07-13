@@ -1,5 +1,6 @@
 ---
 name: hello-world
+version: 1.0.0
 description: Minimal example skill; teaches the SKILL.md contract itself.
 triggers:
   - how do I write a skill
