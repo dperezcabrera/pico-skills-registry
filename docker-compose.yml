@@ -1,0 +1,11 @@
+services:
+  registry:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-change-me}
+      # mount your protected catalog and point at it:
+      # CATALOG_PATH: /catalog
+    # volumes:
+    #   - ./my-private-catalog:/catalog:ro

@@ -1,0 +1,19 @@
+fastapi:
+  title: pico-skills-registry
+  version: 0.1.0
+registry:
+  catalog_path: ${CATALOG_PATH:example-catalog}
+server_auth:
+  issuer: ${AUTH_ISSUER:http://localhost:8000}
+  audience: skills-registry
+  auto_create_admin: true
+  admin_email: ${ADMIN_EMAIL:admin@registry.local}
+  admin_password: ${ADMIN_PASSWORD:change-me}
+  admin_role: admin
+auth_client:
+  enabled: true
+  issuer: ${AUTH_ISSUER:http://localhost:8000}
+  audience: skills-registry
+actuator:
+  info:
+    app: pico-skills-registry
