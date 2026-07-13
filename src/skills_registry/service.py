@@ -164,12 +164,20 @@ class RegistryService:
 
     async def update(self, subject: str, roles: set[str], payload: dict) -> SkillView:
         await self.load()
-        norm = validate_payload(payload)
-        current = self._skills.get(norm["name"])
+        name = str(payload.get("name", ""))
+        current = self._skills.get(name)
         if current is None:
             from .store import SkillNotFound
 
-            raise SkillNotFound(norm["name"])
+            raise SkillNotFound(name)
+        # access metadata persists across updates unless explicitly changed:
+        # a PUT that omits groups must NOT silently make a gated skill public
+        inherited = {
+            key: getattr(current, key)
+            for key in ("groups", "tags", "tools")
+            if key not in payload
+        }
+        norm = validate_payload({**inherited, **payload})
         self._authorize_writer(subject, roles, norm["groups"])
         self._authorize_owner(subject, roles, current)
         view = await self._store.update(subject, ",".join(sorted(roles)), norm, content_hash(norm))

@@ -294,3 +294,22 @@ def test_membership_in_unknown_group_is_404(harness):
     client, container = harness
     r = client.put("/api/v1/groups/ghost/members/x@test", headers=bearer(container, "admin"))
     assert r.status_code == 404
+
+
+def test_update_without_groups_keeps_access_control(harness):
+    # regresion (validacion a escala 24 skills): un PUT que omite groups NO
+    # debe convertir una skill protegida en publica
+    client, container = harness
+    ops = bearer(container, "ops", subject="alice@test")
+    client.post("/api/v1/skills", json=payload(name="gated", groups=["ops"]), headers=ops)
+
+    # update SIN groups en el payload
+    r = client.put(
+        "/api/v1/skills/gated",
+        json={"name": "gated", "version": "1.1.0", "description": "v2", "triggers": ["gated"]},
+        headers=ops,
+    )
+    assert r.status_code == 200
+    assert r.json()["groups"] == ["ops"], "los grupos deben heredarse, no resetearse"
+    # sigue invisible para quien no es de ops
+    assert client.get("/api/v1/skills/gated", headers=bearer(container, "user", subject="bob@test")).status_code == 404
