@@ -28,4 +28,12 @@ curl -sf localhost:8000/api/v1/skills/rotate-secrets -H "$AUTH" | grep -q sha256
 curl -sf localhost:8000/api/v1/skills/deploy-service/resources/resources/rollout.sh -H "$AUTH" | grep -q "readiness probe"
 curl -s -o /dev/null -w '%{http_code}' localhost:8000/api/v1/skills?q=deploy | grep -q 401
 
-echo "SMOKE OK: login, busqueda, skill con grupo, recurso y 401 anonimo verificados"
+# ciclo de escritura: crear -> bump -> deprecar -> auditoria
+curl -sf -X POST localhost:8000/api/v1/skills -H "$AUTH" -H 'Content-Type: application/json' \
+  -d '{"name": "smoke-skill", "version": "1.0.0", "description": "smoke", "triggers": ["smoke it"]}' | grep -q '"sha256"'
+curl -sf -X PUT localhost:8000/api/v1/skills/smoke-skill -H "$AUTH" -H 'Content-Type: application/json' \
+  -d '{"version": "1.1.0", "description": "smoke v2", "triggers": ["smoke it"]}' | grep -q '"1.1.0"'
+curl -sf -X POST localhost:8000/api/v1/skills/smoke-skill/deprecate -H "$AUTH" | grep -q deprecated
+curl -sf "localhost:8000/api/v1/audit?limit=10" -H "$AUTH" | grep -q '"action":"create"'
+
+echo "SMOKE OK: lectura, 401 anonimo, y ciclo crear/bump/deprecar/auditar via API"

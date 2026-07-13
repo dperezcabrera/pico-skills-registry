@@ -1,59 +1,51 @@
-"""HTTP surface of the registry.
+"""HTTP surface: reads filtered by groups, writes gated by assigned
+permissions (registry.writer_roles), everything audited.
 
-Every skill endpoint requires a valid JWT (pico-client-auth); results are
-filtered by the caller's roles against each skill's access.groups, with
-empty groups meaning any authenticated caller and admin seeing everything.
-The embedded pico-server-auth issues the tokens; point auth_client at an
-external pico-auth issuer to swap it out with zero code changes.
-
-Lifecycle lives in the catalog repository (PRs, version bumps, status
-transitions); the running registry follows it through POST /reload.
+There is no anonymous path: pico-client-auth validates the JWT on every
+request; the embedded pico-server-auth issues tokens (or point
+auth_client at an external pico-auth issuer).
 """
-
-from dataclasses import dataclass
-from pathlib import Path
 
 from fastapi import HTTPException
 from fastapi.responses import PlainTextResponse
 from pico_client_auth import SecurityContext, requires_role
-from pico_fastapi import controller, get, post
-from pico_ioc import component, configured
+from pico_fastapi import controller, get, post, put
 
-from .catalog import Catalog, CatalogError
-
-
-@configured(target="self", prefix="registry", mapping="tree")
-@dataclass
-class RegistrySettings:
-    catalog_path: str = "example-catalog"
+from .contract import ContractError
+from .service import Forbidden, RegistryService
+from .store import SkillExists, SkillNotFound, VersionNotBumped
 
 
-@component
-class CatalogHolder:
-    """Loads the catalog at startup (fail-fast) and swaps it atomically on
-    reload (fail-safe: an invalid new catalog keeps the old one serving)."""
-
-    def __init__(self, settings: RegistrySettings):
-        self._path = Path(settings.catalog_path)
-        self.catalog = Catalog(self._path)
-
-    def reload(self) -> Catalog:
-        self.catalog = Catalog(self._path)  # raises CatalogError: caller keeps serving the old one
-        return self.catalog
+def _caller() -> tuple[str, set[str]]:
+    claims = SecurityContext.require()
+    return claims.sub, set(SecurityContext.get_roles())
 
 
-def _roles() -> set[str]:
-    return set(SecurityContext.get_roles())
+def _http(exc: Exception) -> HTTPException:
+    if isinstance(exc, ContractError):
+        return HTTPException(status_code=422, detail=str(exc))
+    if isinstance(exc, Forbidden):
+        return HTTPException(status_code=403, detail=str(exc))
+    if isinstance(exc, SkillExists):
+        return HTTPException(status_code=409, detail=f"ya existe: {exc}")
+    if isinstance(exc, VersionNotBumped):
+        return HTTPException(status_code=409, detail=f"version no incrementada: {exc}")
+    if isinstance(exc, SkillNotFound):
+        return HTTPException(status_code=404, detail="no such skill")
+    raise exc
 
 
 @controller(prefix="/api/v1/skills", tags=["Skills"])
 class SkillsController:
-    def __init__(self, holder: CatalogHolder):
-        self._holder = holder
+    def __init__(self, service: RegistryService):
+        self._service = service
+
+    # ── lectura ──────────────────────────────────────────────────
 
     @get("")
     async def search(self, q: str, limit: int = 10):
-        hits = self._holder.catalog.search(q, _roles(), min(limit, 25))
+        _, roles = _caller()
+        hits = await self._service.search(q, roles, min(limit, 25))
         return [
             {"name": s.name, "version": s.version, "status": s.status, "description": s.description, "tags": s.tags}
             for s in hits
@@ -61,40 +53,79 @@ class SkillsController:
 
     @get("/index")
     async def index(self):
-        return [s.meta() for s in self._holder.catalog.visible(_roles())]
+        _, roles = _caller()
+        return [s.meta() for s in await self._service.visible(roles)]
 
     @get("/{name}")
     async def skill(self, name: str):
-        s = self._holder.catalog.skills.get(name)
-        if s is None or not s.visible_to(_roles()):
+        _, roles = _caller()
+        s = await self._service.get(name, roles)
+        if s is None:
             raise HTTPException(status_code=404, detail="no such skill")
         return {**s.meta(), "body": s.body}
 
+    @get("/{name}/versions")
+    async def versions(self, name: str):
+        _, roles = _caller()
+        history = await self._service.versions(name, roles)
+        if history is None:
+            raise HTTPException(status_code=404, detail="no such skill")
+        return history
+
     @get("/{name}/resources/{path:path}")
     async def resource(self, name: str, path: str):
-        s = self._holder.catalog.skills.get(name)
-        if s is None or not s.visible_to(_roles()):
-            raise HTTPException(status_code=404, detail="no such skill")
+        _, roles = _caller()
+        content = await self._service.resource(name, path, roles)
+        if content is None:
+            raise HTTPException(status_code=404, detail="no such resource")
+        return PlainTextResponse(content)
+
+    # ── escritura (permisos asignados via registry.writer_roles) ─
+
+    @post("")
+    async def create(self, payload: dict):
+        subject, roles = _caller()
         try:
-            file = self._holder.catalog.resource_path(s, path)
-        except CatalogError as e:
-            raise HTTPException(status_code=404, detail=str(e)) from e
-        return PlainTextResponse(file.read_text(encoding="utf-8"))
+            view = await self._service.create(subject, roles, payload)
+        except Exception as exc:  # noqa: BLE001
+            raise _http(exc) from exc
+        return view.meta()
+
+    @put("/{name}")
+    async def update(self, name: str, payload: dict):
+        subject, roles = _caller()
+        try:
+            view = await self._service.update(subject, roles, {**payload, "name": name})
+        except Exception as exc:  # noqa: BLE001
+            raise _http(exc) from exc
+        return view.meta()
+
+    @post("/{name}/deprecate")
+    async def deprecate(self, name: str, payload: dict | None = None):
+        subject, roles = _caller()
+        superseded_by = (payload or {}).get("superseded_by", "")
+        try:
+            view = await self._service.transition(subject, roles, name, "deprecated", superseded_by)
+        except Exception as exc:  # noqa: BLE001
+            raise _http(exc) from exc
+        return view.meta()
+
+    @post("/{name}/retire")
+    async def retire(self, name: str):
+        subject, roles = _caller()
+        try:
+            view = await self._service.transition(subject, roles, name, "retired")
+        except Exception as exc:  # noqa: BLE001
+            raise _http(exc) from exc
+        return {"name": view.name, "status": view.status}
 
 
-@controller(prefix="/api/v1/catalog", tags=["Catalog"])
-class CatalogAdminController:
-    def __init__(self, holder: CatalogHolder):
-        self._holder = holder
+@controller(prefix="/api/v1/audit", tags=["Audit"])
+class AuditController:
+    def __init__(self, service: RegistryService):
+        self._service = service
 
     @requires_role("admin")
-    @post("/reload")
-    async def reload(self):
-        """Re-scan the mounted catalog (call it from the catalog repo's CD
-        after merge). Atomic: an invalid catalog is rejected and the
-        previous one keeps serving."""
-        try:
-            catalog = self._holder.reload()
-        except CatalogError as e:
-            raise HTTPException(status_code=422, detail=f"catalogo rechazado: {e}") from e
-        return {"skills": len(catalog.skills)}
+    @get("")
+    async def audit(self, limit: int = 100):
+        return await self._service.audit(min(limit, 500))

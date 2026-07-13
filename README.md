@@ -54,13 +54,24 @@ Body: loaded only when a caller fetches the skill explicitly.
 
 Boot-time validation: frontmatter contract, name/directory match, at least one trigger, mandatory `version` (X.Y.Z), no credential-looking files (`.env`, `id_rsa`, `*.pem`, ...), resource size cap, sha256 per skill published in the index so consumers can verify integrity.
 
-## Lifecycle
+## Lifecycle: a real write API, permission-gated
 
-Skills are dynamic, but their lifecycle lives in the catalog repository, not in a write API - creation and updates go through pull requests (agents included: an agent proposes a skill by opening a PR, the gates run, a human merges), so the review gate is never bypassed.
+Skills are dynamic: authenticated callers with assigned permissions create, update, deprecate and retire them through the API, and every mutation is audited.
 
-- **Version**: mandatory `version: X.Y.Z` per skill; the catalog CI rejects content changes without a bump. The index publishes version plus content hash.
-- **Deprecate**: `status: deprecated` (optionally `superseded_by: other-skill`) keeps the skill served but ranked last in search and flagged in every response; `status: retired` hides it entirely while its history stays in git.
-- **Hot reload**: `POST /api/v1/catalog/reload` (admin) re-scans the mounted catalog without restarting - call it from the catalog's CD after merge (or a git-sync sidecar). Atomic and fail-safe: an invalid catalog is rejected with a 422 and the previous one keeps serving.
+| Endpoint | Rule |
+|---|---|
+| `POST /api/v1/skills` | Caller's role must be in `registry.writer_roles`; a writer only publishes for groups it belongs to (admin: any) |
+| `PUT /api/v1/skills/{name}` | Author or admin; the server enforces a version bump - every update is a NEW immutable version, nothing is overwritten |
+| `POST /api/v1/skills/{name}/deprecate` | Author or admin; optionally `{"superseded_by": "..."}`; still served, ranked last, flagged |
+| `POST /api/v1/skills/{name}/retire` | Author or admin; hidden from all reads, history preserved |
+| `GET /api/v1/skills/{name}/versions` | Immutable version history with hashes and authors |
+| `GET /api/v1/audit` | Admin only: who did what, when, to which version |
+
+Write payloads carry the same contract as SKILL.md frontmatter (name, version, description, triggers, tags, groups, tools, body, resources) and pass the same validation - credential-looking resource paths are rejected with a 422.
+
+## Storage backend
+
+A conscious, configurable decision (`registry.backend`): the storage port (`SkillStore`) has one driver today, `db` (pico-sqlalchemy: SQLite on a volume by default, PostgreSQL via `DATABASE_URL`). A `git` driver (every mutation a commit, push to a protected remote) is planned; any new driver must pass the same contract test suite. The mounted directory (`CATALOG_PATH`) is a SEED: imported once when the database is empty, useful for bootstrapping from a catalog repository.
 
 ## Development
 

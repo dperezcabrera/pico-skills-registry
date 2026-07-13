@@ -34,6 +34,7 @@ def create_app() -> FastAPI:
         modules=[
             "skills_registry",
             "pico_fastapi",
+            "pico_sqlalchemy",
             "pico_server_auth",
             "pico_client_auth",
             "pico_actuator",

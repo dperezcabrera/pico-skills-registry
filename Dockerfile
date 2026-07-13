@@ -7,6 +7,8 @@ RUN pip install --no-cache-dir .
 
 COPY config ./config
 COPY example-catalog ./example-catalog
+RUN mkdir -p /data
+VOLUME /data
 
 # Mount your protected catalog at /catalog and set CATALOG_PATH=/catalog
 EXPOSE 8000

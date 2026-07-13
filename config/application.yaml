@@ -2,7 +2,11 @@ fastapi:
   title: pico-skills-registry
   version: 0.1.0
 registry:
-  catalog_path: ${CATALOG_PATH:example-catalog}
+  backend: db
+  seed_path: ${CATALOG_PATH:example-catalog}
+  writer_roles: [admin]
+database:
+  url: ${DATABASE_URL:sqlite+aiosqlite:////data/registry.db}
 server_auth:
   issuer: ${AUTH_ISSUER:http://localhost:8000}
   audience: skills-registry
