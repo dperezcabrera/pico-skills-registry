@@ -46,9 +46,17 @@ class RegistryService:
         self._loaded = False
         self._lock = asyncio.Lock()
 
+    @property
+    def loaded(self) -> bool:
+        return self._loaded
+
+    @property
+    def size(self) -> int:
+        return len(self._skills)
+
     # ── snapshot y busqueda ──────────────────────────────────────
 
-    async def _ensure_loaded(self) -> None:
+    async def load(self) -> None:
         if self._loaded:
             return
         async with self._lock:
@@ -88,7 +96,7 @@ class RegistryService:
         return views
 
     async def search(self, query: str, roles: set[str], limit: int = 10) -> list[SkillView]:
-        await self._ensure_loaded()
+        await self.load()
         sanitized = " ".join(re.findall(r"\w+", query))
         if not sanitized:
             return []
@@ -101,11 +109,11 @@ class RegistryService:
         return hits[:limit]
 
     async def visible(self, roles: set[str]) -> list[SkillView]:
-        await self._ensure_loaded()
+        await self.load()
         return [s for s in self._skills.values() if s.visible_to(roles)]
 
     async def get(self, name: str, roles: set[str]) -> SkillView | None:
-        await self._ensure_loaded()
+        await self.load()
         skill = self._skills.get(name)
         return skill if skill is not None and skill.visible_to(roles) else None
 
@@ -135,7 +143,7 @@ class RegistryService:
             raise Forbidden("solo el autor o admin modifican una skill existente")
 
     async def create(self, subject: str, roles: set[str], payload: dict) -> SkillView:
-        await self._ensure_loaded()
+        await self.load()
         norm = validate_payload(payload)
         self._authorize_writer(roles, norm["groups"])
         view = await self._store.create(subject, ",".join(sorted(roles)), norm, content_hash(norm))
@@ -143,7 +151,7 @@ class RegistryService:
         return view
 
     async def update(self, subject: str, roles: set[str], payload: dict) -> SkillView:
-        await self._ensure_loaded()
+        await self.load()
         norm = validate_payload(payload)
         current = self._skills.get(norm["name"])
         if current is None:
@@ -159,7 +167,7 @@ class RegistryService:
     async def transition(
         self, subject: str, roles: set[str], name: str, status: str, superseded_by: str = ""
     ) -> SkillView:
-        await self._ensure_loaded()
+        await self.load()
         if status not in ("active", "deprecated", "retired"):
             raise ContractError(f"status invalido '{status}'")
         current = self._skills.get(name)
@@ -172,3 +180,34 @@ class RegistryService:
         view = await self._store.transition(subject, ",".join(sorted(roles)), name, status, superseded_by)
         self._refresh(view)
         return view
+
+
+@component
+class RegistryWarmup:
+    """Fail-fast: BD accesible y seed valido se comprueban en el ARRANQUE,
+    no en la primera peticion. Es un DatabaseConfigurer tardio: el
+    lifecycle de pico-sqlalchemy garantiza el orden (DDL primero) y desde
+    0.5.1 ejecuta los hooks fuera del event loop en cualquier contexto."""
+
+    priority = 100  # despues de SchemaSetup (DDL, prioridad 0)
+
+    def __init__(self, service: RegistryService):
+        self._service = service
+
+    def configure_database(self, engine) -> None:
+        asyncio.run(self._service.load())
+
+
+@component
+class RegistryHealth:
+    """El health del actuator refleja el estado real del catalogo."""
+
+    name = "registry"
+
+    def __init__(self, service: RegistryService):
+        self._service = service
+
+    def check(self):
+        if not self._service.loaded:
+            raise RuntimeError("catalogo no cargado")
+        return {"status": "UP", "skills": self._service.size}

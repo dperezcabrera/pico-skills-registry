@@ -200,3 +200,37 @@ def test_dir_catalog_golden_search(tmp_path):
     )
     hits = Catalog(tmp_path).search("como despliego", roles={"admin"})
     assert hits and hits[0].name == "deploy-thing"
+
+
+# ── fail-fast en el arranque ─────────────────────────────────────
+
+
+def test_invalid_seed_kills_the_boot(make_container, tmp_path):
+    bad = tmp_path / "catalog" / "skills" / "leaky"
+    bad.mkdir(parents=True)
+    (bad / "SKILL.md").write_text(
+        "---\nname: leaky\nversion: 1.0.0\ndescription: x\ntriggers: [x]\n---\nb", encoding="utf-8"
+    )
+    (bad / "id_rsa").write_text("PRIVATE", encoding="utf-8")
+    cfg = config(tmp_path)
+    cfg["registry"]["seed_path"] = str(tmp_path / "catalog")
+    with pytest.raises(Exception, match="credencial"):
+        make_container(
+            "pico_fastapi", "pico_sqlalchemy", "pico_server_auth", "pico_client_auth", "pico_actuator", config=cfg
+        )
+
+
+def test_unknown_backend_kills_the_boot(make_container, tmp_path):
+    cfg = config(tmp_path)
+    cfg["registry"]["backend"] = "git"
+    with pytest.raises(Exception, match="no implementado"):
+        make_container(
+            "pico_fastapi", "pico_sqlalchemy", "pico_server_auth", "pico_client_auth", "pico_actuator", config=cfg
+        )
+
+
+def test_health_reflects_loaded_catalog(harness):
+    client, container = harness
+    health = client.get("/actuator/health")
+    assert health.status_code == 200
+    assert '"registry"' in health.text and '"skills"' in health.text
