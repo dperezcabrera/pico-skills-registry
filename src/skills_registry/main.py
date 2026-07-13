@@ -3,33 +3,17 @@
     uvicorn --factory skills_registry.main:create_app
 
 Config values support ${VAR:default} placeholders resolved from the
-environment at boot.
+environment at boot (pico-ioc expand_env).
 """
 
 import os
-import re
 
-import yaml
 from fastapi import FastAPI
-from pico_ioc import DictSource, configuration, init
-
-_PLACEHOLDER = re.compile(r"\$\{(\w+)(?::([^}]*))?\}")
-
-
-def _expand(value):
-    if isinstance(value, str):
-        return _PLACEHOLDER.sub(lambda m: os.environ.get(m.group(1), m.group(2) or ""), value)
-    if isinstance(value, dict):
-        return {k: _expand(v) for k, v in value.items()}
-    if isinstance(value, list):
-        return [_expand(v) for v in value]
-    return value
+from pico_ioc import YamlTreeSource, configuration, init
 
 
 def create_app() -> FastAPI:
     config_path = os.environ.get("CONFIG_PATH", "config/application.yaml")
-    with open(config_path, encoding="utf-8") as fh:
-        raw = yaml.safe_load(fh)
     container = init(
         modules=[
             "skills_registry",
@@ -39,6 +23,6 @@ def create_app() -> FastAPI:
             "pico_client_auth",
             "pico_actuator",
         ],
-        config=configuration(DictSource(_expand(raw))),
+        config=configuration(YamlTreeSource(config_path, expand_env=True)),
     )
     return container.get(FastAPI)

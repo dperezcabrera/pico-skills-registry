@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "Self-hostable, authenticated skills registry for coding agents"
 requires-python = ">=3.11"
 dependencies = [
-    "pico-ioc[yaml]>=2.3.3",
+    "pico-ioc[yaml]>=2.3.4",
     "pico-fastapi>=0.3.1",
     "pico-server-auth>=0.2.1",
     "pico-client-auth>=0.5.0",
@@ -16,7 +16,6 @@ dependencies = [
     "pico-sqlalchemy>=0.5.1",
     "aiosqlite>=0.20",
     "uvicorn>=0.30",
-    "PyYAML>=6.0",
 ]
 
 [project.optional-dependencies]
