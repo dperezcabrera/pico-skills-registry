@@ -100,12 +100,6 @@ def main() -> int:
     assert c.post("/api/v1/skills/rotate-logs/deprecate", json={"superseded_by": "monitor-alerts"}, headers=admin).json()["status"] == "deprecated"
     print("[ok] ciclo de vida: bump 1.1.0 + deprecate")
 
-    # golden queries con el rol que corresponde (membresia via registry)
-    def bearer_for(subject_role: str) -> dict:
-        # personas: token de rol "user"; la visibilidad viene de la MEMBRESIA
-        r = c.post("/api/v1/auth/login", json={"email": "admin@registry.local", "password": admin_pass})
-        return admin if subject_role == "admin" else {"Authorization": f"Bearer {token}"}
-
     # busqueda a escala: hit@1 sobre 15 golden queries (ES + EN) con 24 skills
     hits1 = 0
     latencies = []
