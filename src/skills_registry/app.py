@@ -9,7 +9,7 @@ auth_client at an external pico-auth issuer).
 from fastapi import HTTPException
 from fastapi.responses import PlainTextResponse
 from pico_client_auth import SecurityContext, requires_role
-from pico_fastapi import controller, get, post, put
+from pico_fastapi import controller, delete, get, post, put
 
 from .contract import ContractError
 from .service import Forbidden, RegistryService
@@ -44,8 +44,8 @@ class SkillsController:
 
     @get("")
     async def search(self, q: str, limit: int = 10):
-        _, roles = _caller()
-        hits = await self._service.search(q, roles, min(limit, 25))
+        subject, roles = _caller()
+        hits = await self._service.search(q, subject, roles, min(limit, 25))
         return [
             {"name": s.name, "version": s.version, "status": s.status, "description": s.description, "tags": s.tags}
             for s in hits
@@ -53,29 +53,29 @@ class SkillsController:
 
     @get("/index")
     async def index(self):
-        _, roles = _caller()
-        return [s.meta() for s in await self._service.visible(roles)]
+        subject, roles = _caller()
+        return [s.meta() for s in await self._service.visible(subject, roles)]
 
     @get("/{name}")
     async def skill(self, name: str):
-        _, roles = _caller()
-        s = await self._service.get(name, roles)
+        subject, roles = _caller()
+        s = await self._service.get(name, subject, roles)
         if s is None:
             raise HTTPException(status_code=404, detail="no such skill")
         return {**s.meta(), "body": s.body}
 
     @get("/{name}/versions")
     async def versions(self, name: str):
-        _, roles = _caller()
-        history = await self._service.versions(name, roles)
+        subject, roles = _caller()
+        history = await self._service.versions(name, subject, roles)
         if history is None:
             raise HTTPException(status_code=404, detail="no such skill")
         return history
 
     @get("/{name}/resources/{path:path}")
     async def resource(self, name: str, path: str):
-        _, roles = _caller()
-        content = await self._service.resource(name, path, roles)
+        subject, roles = _caller()
+        content = await self._service.resource(name, path, subject, roles)
         if content is None:
             raise HTTPException(status_code=404, detail="no such resource")
         return PlainTextResponse(content)
@@ -118,6 +118,59 @@ class SkillsController:
         except Exception as exc:  # noqa: BLE001
             raise _http(exc) from exc
         return {"name": view.name, "status": view.status}
+
+
+@controller(prefix="/api/v1/groups", tags=["Groups"])
+class GroupsController:
+    """Permisos a grupos (can_write) y usuarios/agentes a grupos: cambiar
+    una membresia surte efecto inmediato sin tocar skills ni reemitir
+    tokens."""
+
+    def __init__(self, service: RegistryService):
+        self._service = service
+
+    @requires_role("admin")
+    @get("")
+    async def groups(self):
+        return await self._service.groups()
+
+    @requires_role("admin")
+    @put("/{name}")
+    async def upsert(self, name: str, payload: dict | None = None):
+        subject, roles = _caller()
+        can_write = bool((payload or {}).get("can_write", False))
+        return await self._service.upsert_group(subject, roles, name, can_write)
+
+    @requires_role("admin")
+    @put("/{name}/members/{member}")
+    async def add_member(self, name: str, member: str):
+        subject, roles = _caller()
+        try:
+            await self._service.set_membership(subject, roles, name, member, add=True)
+        except Exception as exc:  # noqa: BLE001
+            raise _http(exc) from exc
+        return {"group": name, "member": member}
+
+    @requires_role("admin")
+    @delete("/{name}/members/{member}")
+    async def remove_member(self, name: str, member: str):
+        subject, roles = _caller()
+        try:
+            await self._service.set_membership(subject, roles, name, member, add=False)
+        except Exception as exc:  # noqa: BLE001
+            raise _http(exc) from exc
+        return {"group": name, "member": member, "removed": True}
+
+
+@controller(prefix="/api/v1/me", tags=["Me"])
+class MeController:
+    def __init__(self, service: RegistryService):
+        self._service = service
+
+    @get("")
+    async def me(self):
+        subject, roles = _caller()
+        return await self._service.whoami(subject, roles)
 
 
 @controller(prefix="/api/v1/audit", tags=["Audit"])

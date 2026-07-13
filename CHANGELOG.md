@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-07-13
+
+### Added
+- RBAC: permissions assigned to groups (`can_write`) and users/agents assigned to groups, both admin-managed and audited (`/api/v1/groups`). A caller's effective groups are its token roles plus its registry memberships - one membership change takes effect immediately, without editing skills or reissuing tokens.
+- `GET /api/v1/me`: resolved identity (subject, roles, effective groups, write permission).
+
 ## [0.3.1] - 2026-07-13
 
 ### Fixed

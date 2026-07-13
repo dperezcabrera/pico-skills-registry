@@ -234,3 +234,63 @@ def test_health_reflects_loaded_catalog(harness):
     health = client.get("/actuator/health")
     assert health.status_code == 200
     assert '"registry"' in health.text and '"skills"' in health.text
+
+
+# ── RBAC: permisos a grupos, usuarios/agentes a grupos ───────────
+
+
+def test_membership_grants_visibility_without_new_token(harness):
+    client, container = harness
+    alice = bearer(container, "user", subject="alice@test")
+    admin = bearer(container, "admin")
+
+    # con su token de rol "user" no ve las skills de ops
+    assert client.get("/api/v1/skills/deploy-service", headers=alice).status_code == 404
+
+    client.put("/api/v1/groups/ops", json={"can_write": False}, headers=admin)
+    client.put("/api/v1/groups/ops/members/alice@test", headers=admin)
+
+    # MISMO token: la membresia surte efecto sin reemitir nada
+    assert client.get("/api/v1/skills/deploy-service", headers=alice).status_code == 200
+    me = client.get("/api/v1/me", headers=alice).json()
+    assert "ops" in me["groups"] and me["can_write"] is False
+
+    client.delete("/api/v1/groups/ops/members/alice@test", headers=admin)
+    assert client.get("/api/v1/skills/deploy-service", headers=alice).status_code == 404
+
+
+def test_can_write_group_grants_write_permission(harness):
+    client, container = harness
+    bob = bearer(container, "user", subject="bob@test")
+    admin = bearer(container, "admin")
+
+    assert client.post("/api/v1/skills", json=payload(name="bobs"), headers=bob).status_code == 403
+
+    client.put("/api/v1/groups/authors", json={"can_write": True}, headers=admin)
+    client.put("/api/v1/groups/authors/members/bob@test", headers=admin)
+
+    r = client.post("/api/v1/skills", json=payload(name="bobs", groups=["authors"]), headers=bob)
+    assert r.status_code == 200, r.text
+
+
+def test_group_management_is_admin_only_and_audited(harness):
+    client, container = harness
+    ops = bearer(container, "ops")
+    admin = bearer(container, "admin")
+
+    assert client.put("/api/v1/groups/x", json={"can_write": True}, headers=ops).status_code == 403
+    assert client.get("/api/v1/groups", headers=ops).status_code == 403
+
+    client.put("/api/v1/groups/qa", json={"can_write": False}, headers=admin)
+    client.put("/api/v1/groups/qa/members/carol@test", headers=admin)
+    groups = client.get("/api/v1/groups", headers=admin).json()
+    assert {"name": "qa", "can_write": False, "members": ["carol@test"]} in groups
+
+    actions = [e["action"] for e in client.get("/api/v1/audit", headers=admin).json()]
+    assert "group-upsert" in actions and "member-add" in actions
+
+
+def test_membership_in_unknown_group_is_404(harness):
+    client, container = harness
+    r = client.put("/api/v1/groups/ghost/members/x@test", headers=bearer(container, "admin"))
+    assert r.status_code == 404

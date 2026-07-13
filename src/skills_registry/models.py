@@ -46,6 +46,20 @@ class SkillResourceRow(AppBase):
     content: Mapped[str] = mapped_column(Text)
 
 
+class GroupRow(AppBase):
+    __tablename__ = "groups"
+    name: Mapped[str] = mapped_column(String(100), primary_key=True)
+    can_write: Mapped[bool] = mapped_column(default=False)
+
+
+class MemberRow(AppBase):
+    __tablename__ = "group_members"
+    __table_args__ = (UniqueConstraint("group_name", "subject"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    group_name: Mapped[str] = mapped_column(String(100), index=True)
+    subject: Mapped[str] = mapped_column(String(200), index=True)
+
+
 class AuditRow(AppBase):
     __tablename__ = "audit_log"
     id: Mapped[int] = mapped_column(primary_key=True)

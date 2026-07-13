@@ -69,6 +69,19 @@ Skills are dynamic: authenticated callers with assigned permissions create, upda
 
 Write payloads carry the same contract as SKILL.md frontmatter (name, version, description, triggers, tags, groups, tools, body, resources) and pass the same validation - credential-looking resource paths are rejected with a 422.
 
+## Groups and permissions (RBAC)
+
+Two independent, admin-managed assignments make permissions efficient: permissions go to groups, and users/agents go to groups. Changing one membership row takes effect immediately - no skill is edited, no token is reissued.
+
+| Endpoint (admin) | Purpose |
+|---|---|
+| `PUT /api/v1/groups/{name}` | Create/update a group; `{"can_write": true}` grants write permission to its members |
+| `PUT /api/v1/groups/{name}/members/{subject}` | Assign a user/agent to the group |
+| `DELETE /api/v1/groups/{name}/members/{subject}` | Revoke the membership |
+| `GET /api/v1/groups` | Groups with permissions and members |
+
+A caller's effective groups are its token roles plus its registry memberships; `GET /api/v1/me` shows the resolved identity (subject, roles, effective groups, write permission). Skills keep declaring `access.groups`; visibility and write checks run against the effective set. Every group mutation lands in the audit trail.
+
 ## Storage backend
 
 A conscious, configurable decision (`registry.backend`): the storage port (`SkillStore`) has one driver today, `db` (pico-sqlalchemy: SQLite on a volume by default, PostgreSQL via `DATABASE_URL`). A `git` driver (every mutation a commit, push to a protected remote) is planned; any new driver must pass the same contract test suite. The mounted directory (`CATALOG_PATH`) is a SEED: imported once when the database is empty, useful for bootstrapping from a catalog repository.

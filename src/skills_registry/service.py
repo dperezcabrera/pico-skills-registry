@@ -43,6 +43,8 @@ class RegistryService:
         self._store = store
         self._skills: dict[str, SkillView] = {}
         self._index = None
+        self._writable: dict[str, bool] = {}
+        self._memberships: dict[str, set[str]] = {}
         self._loaded = False
         self._lock = asyncio.Lock()
 
@@ -66,6 +68,7 @@ class RegistryService:
             if not views and self._settings.seed_path:
                 views = await self._seed(Path(self._settings.seed_path))
             self._replace_snapshot(views)
+            self._writable, self._memberships = await self._store.rbac_snapshot()
             self._loaded = True
 
     def _replace_snapshot(self, views: list[SkillView]) -> None:
@@ -95,8 +98,13 @@ class RegistryService:
         logger.info("seed importado: %d skills desde %s", len(views), root)
         return views
 
-    async def search(self, query: str, roles: set[str], limit: int = 10) -> list[SkillView]:
+    def effective(self, subject: str, roles: set[str]) -> set[str]:
+        """Grupos efectivos: roles del token + membresias asignadas en el registry."""
+        return roles | self._memberships.get(subject, set())
+
+    async def search(self, query: str, subject: str, roles: set[str], limit: int = 10) -> list[SkillView]:
         await self.load()
+        roles = self.effective(subject, roles)
         sanitized = " ".join(re.findall(r"\w+", query))
         if not sanitized:
             return []
@@ -108,22 +116,23 @@ class RegistryService:
         hits.sort(key=lambda s: s.status != "active")
         return hits[:limit]
 
-    async def visible(self, roles: set[str]) -> list[SkillView]:
+    async def visible(self, subject: str, roles: set[str]) -> list[SkillView]:
         await self.load()
-        return [s for s in self._skills.values() if s.visible_to(roles)]
+        effective = self.effective(subject, roles)
+        return [s for s in self._skills.values() if s.visible_to(effective)]
 
-    async def get(self, name: str, roles: set[str]) -> SkillView | None:
+    async def get(self, name: str, subject: str, roles: set[str]) -> SkillView | None:
         await self.load()
         skill = self._skills.get(name)
-        return skill if skill is not None and skill.visible_to(roles) else None
+        return skill if skill is not None and skill.visible_to(self.effective(subject, roles)) else None
 
-    async def resource(self, name: str, path: str, roles: set[str]) -> str | None:
-        if await self.get(name, roles) is None:
+    async def resource(self, name: str, path: str, subject: str, roles: set[str]) -> str | None:
+        if await self.get(name, subject, roles) is None:
             return None
         return await self._store.resource(name, path)
 
-    async def versions(self, name: str, roles: set[str]) -> list[dict] | None:
-        if await self.get(name, roles) is None:
+    async def versions(self, name: str, subject: str, roles: set[str]) -> list[dict] | None:
+        if await self.get(name, subject, roles) is None:
             return None
         return await self._store.versions(name)
 
@@ -132,10 +141,13 @@ class RegistryService:
 
     # ── escritura ────────────────────────────────────────────────
 
-    def _authorize_writer(self, roles: set[str], groups: list[str]) -> None:
-        if not roles & set(self._settings.writer_roles):
-            raise Forbidden("rol sin permiso de escritura")
-        if "admin" not in roles and not set(groups) <= roles:
+    def _authorize_writer(self, subject: str, roles: set[str], groups: list[str]) -> None:
+        effective = self.effective(subject, roles)
+        writer_by_role = bool(roles & set(self._settings.writer_roles))
+        writer_by_group = any(self._writable.get(g, False) for g in effective)
+        if not (writer_by_role or writer_by_group):
+            raise Forbidden("sin permiso de escritura (ni rol escritor ni grupo con can_write)")
+        if "admin" not in roles and not set(groups) <= effective:
             raise Forbidden("no puedes publicar para grupos a los que no perteneces")
 
     def _authorize_owner(self, subject: str, roles: set[str], skill: SkillView) -> None:
@@ -145,7 +157,7 @@ class RegistryService:
     async def create(self, subject: str, roles: set[str], payload: dict) -> SkillView:
         await self.load()
         norm = validate_payload(payload)
-        self._authorize_writer(roles, norm["groups"])
+        self._authorize_writer(subject, roles, norm["groups"])
         view = await self._store.create(subject, ",".join(sorted(roles)), norm, content_hash(norm))
         self._refresh(view)
         return view
@@ -158,7 +170,7 @@ class RegistryService:
             from .store import SkillNotFound
 
             raise SkillNotFound(norm["name"])
-        self._authorize_writer(roles, norm["groups"])
+        self._authorize_writer(subject, roles, norm["groups"])
         self._authorize_owner(subject, roles, current)
         view = await self._store.update(subject, ",".join(sorted(roles)), norm, content_hash(norm))
         self._refresh(view)
@@ -175,11 +187,39 @@ class RegistryService:
             from .store import SkillNotFound
 
             raise SkillNotFound(name)
-        self._authorize_writer(roles, current.groups)
+        self._authorize_writer(subject, roles, current.groups)
         self._authorize_owner(subject, roles, current)
         view = await self._store.transition(subject, ",".join(sorted(roles)), name, status, superseded_by)
         self._refresh(view)
         return view
+
+    # ── grupos y membresias (admin) ──────────────────────────────
+
+    async def groups(self) -> list[dict]:
+        await self.load()
+        return await self._store.groups()
+
+    async def upsert_group(self, subject: str, roles: set[str], name: str, can_write: bool) -> dict:
+        await self.load()
+        result = await self._store.upsert_group(subject, ",".join(sorted(roles)), name, can_write)
+        self._writable, self._memberships = await self._store.rbac_snapshot()
+        return result
+
+    async def set_membership(self, subject: str, roles: set[str], group: str, member: str, add: bool) -> None:
+        await self.load()
+        await self._store.set_membership(subject, ",".join(sorted(roles)), group, member, add)
+        self._writable, self._memberships = await self._store.rbac_snapshot()
+
+    async def whoami(self, subject: str, roles: set[str]) -> dict:
+        await self.load()
+        effective = self.effective(subject, roles)
+        return {
+            "subject": subject,
+            "roles": sorted(roles),
+            "groups": sorted(effective),
+            "can_write": bool(roles & set(self._settings.writer_roles))
+            or any(self._writable.get(g, False) for g in effective),
+        }
 
 
 @component

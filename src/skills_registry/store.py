@@ -15,7 +15,7 @@ from pico_ioc import component
 from pico_sqlalchemy import SessionManager, get_session, transactional
 from sqlalchemy import select
 
-from .models import AuditRow, SkillResourceRow, SkillRow, SkillVersionRow
+from .models import AuditRow, GroupRow, MemberRow, SkillResourceRow, SkillRow, SkillVersionRow
 
 
 class StoreError(Exception):
@@ -249,3 +249,53 @@ class SqlSkillStore:
             }
             for r in rows
         ]
+
+    # ── grupos y membresias (RBAC) ───────────────────────────────
+
+    @transactional
+    async def groups(self) -> list[dict]:
+        session = get_session(self.sm)
+        groups = (await session.execute(select(GroupRow))).scalars().all()
+        members = (await session.execute(select(MemberRow))).scalars().all()
+        by_group: dict[str, list[str]] = {}
+        for m in members:
+            by_group.setdefault(m.group_name, []).append(m.subject)
+        return [{"name": g.name, "can_write": g.can_write, "members": sorted(by_group.get(g.name, []))} for g in groups]
+
+    @transactional
+    async def upsert_group(self, subject: str, roles: str, name: str, can_write: bool) -> dict:
+        session = get_session(self.sm)
+        group = await session.get(GroupRow, name)
+        if group is None:
+            group = GroupRow(name=name, can_write=can_write)
+            session.add(group)
+        else:
+            group.can_write = can_write
+        self._audit(session, subject, roles, "group-upsert", name, version="write" if can_write else "read")
+        await session.flush()
+        return {"name": name, "can_write": can_write}
+
+    @transactional
+    async def set_membership(self, subject: str, roles: str, group: str, member: str, add: bool) -> None:
+        session = get_session(self.sm)
+        if await session.get(GroupRow, group) is None:
+            raise SkillNotFound(f"grupo {group}")
+        existing = (
+            await session.execute(select(MemberRow).where(MemberRow.group_name == group, MemberRow.subject == member))
+        ).scalar_one_or_none()
+        if add and existing is None:
+            session.add(MemberRow(group_name=group, subject=member))
+        if not add and existing is not None:
+            await session.delete(existing)
+        self._audit(session, subject, roles, "member-add" if add else "member-remove", group, version=member)
+        await session.flush()
+
+    @transactional
+    async def rbac_snapshot(self) -> tuple[dict[str, bool], dict[str, set[str]]]:
+        """(grupo -> can_write, subject -> grupos): para cachear en memoria."""
+        session = get_session(self.sm)
+        writable = {g.name: g.can_write for g in (await session.execute(select(GroupRow))).scalars().all()}
+        memberships: dict[str, set[str]] = {}
+        for m in (await session.execute(select(MemberRow))).scalars().all():
+            memberships.setdefault(m.subject, set()).add(m.group_name)
+        return writable, memberships
