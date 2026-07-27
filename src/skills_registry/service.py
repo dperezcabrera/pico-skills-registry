@@ -172,11 +172,7 @@ class RegistryService:
             raise SkillNotFound(name)
         # access metadata persists across updates unless explicitly changed:
         # a PUT that omits groups must NOT silently make a gated skill public
-        inherited = {
-            key: getattr(current, key)
-            for key in ("groups", "tags", "tools")
-            if key not in payload
-        }
+        inherited = {key: getattr(current, key) for key in ("groups", "tags", "tools") if key not in payload}
         norm = validate_payload({**inherited, **payload})
         self._authorize_writer(subject, roles, norm["groups"])
         self._authorize_owner(subject, roles, current)
